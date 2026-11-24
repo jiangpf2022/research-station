@@ -1,2 +1,10 @@
 <!doctype html><meta charset="utf-8"><meta name="robots" content="noindex, nofollow"><title>&#8203;</title>
-<script>(function(){var p=location.pathname,i=p.indexOf('/app/');var base=i>=0?p.slice(0,i):'/'+(p.split('/')[1]||'');var next=i>=0?p.slice(i+4)+location.search:'';location.replace(base+'/'+(next?'?next='+encodeURIComponent(next):''));})();</script>
+<script>(async function(){
+  var p=location.pathname,i=p.indexOf('/app/');var base=i>=0?p.slice(0,i):'/'+(p.split('/')[1]||'');
+  var next=i>=0?p.slice(i+4)+location.search:'';
+  // A hard reload bypasses the service worker and lands here; if one is installed, load the page once more through it.
+  try{ if(i>=0&&'serviceWorker' in navigator){ var reg=await navigator.serviceWorker.getRegistration(base+'/app/');
+    var last=+(sessionStorage.getItem('ps-retry')||0);
+    if(reg&&reg.active&&Date.now()-last>15000){ sessionStorage.setItem('ps-retry',String(Date.now())); location.reload(); return; } } }catch(e){}
+  location.replace(base+'/'+(next?'?next='+encodeURIComponent(next):''));
+})();</script>

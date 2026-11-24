@@ -23,7 +23,7 @@ const BASE = location.pathname.replace(/\/(index\.html)?$/, '');
 const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 function idb(){return new Promise((ok,no)=>{const r=indexedDB.open('ps-vault-v2',1);r.onupgradeneeded=()=>r.result.createObjectStore('k');r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)})}
 const KEEP_MS = 3 * 24 * 3600 * 1000;   // an unlocked project stays open in this browser for 3 days
-async function put(id,key){const db=await idb();await new Promise((ok,no)=>{const t=db.transaction('k','readwrite');t.objectStore('k').put({key, exp: Date.now() + KEEP_MS},id);t.oncomplete=ok;t.onerror=()=>no(t.error)})}
+async function put(id,key){const db=await idb();await new Promise((ok,no)=>{const t=db.transaction('k','readwrite');t.objectStore('k').put({raw: key, exp: Date.now() + KEEP_MS},id);t.oncomplete=ok;t.onerror=()=>no(t.error)})}
 async function clearAll(){const db=await idb();await new Promise(ok=>{const t=db.transaction('k','readwrite');t.objectStore('k').clear();t.oncomplete=ok})}
 async function dec(key,buf){return crypto.subtle.decrypt({name:'AES-CBC',iv:buf.slice(0,16)},key,buf.slice(16))}
 const params = new URLSearchParams(location.search);
@@ -35,18 +35,27 @@ if (params.has('logout')) { clearAll().then(()=>{ history.replaceState(null,'',B
     const db = await idb();
     const rows = await new Promise(ok=>{const out=[];const c=db.transaction('k').objectStore('k').openCursor();c.onsuccess=()=>{const r=c.result;if(r){out.push({id:r.key,v:r.value});r.continue()}else ok(out)};c.onerror=()=>ok(out)});
     const box = document.getElementById('open'), now = Date.now();
+    const cfg = await (await fetch(BASE + '/config.json', {cache:'no-store'})).json();
+    let live = 0;
     for (const r of rows) {
-      if (!r.v || !r.v.key || !(r.v.exp > now)) continue;
+      if (!r.v || !r.v.raw || !(r.v.exp > now)) continue;
       try {
-        const t = JSON.parse(new TextDecoder().decode(await dec(r.v.key, await (await fetch(BASE + '/m/' + r.id + '.bin', {cache:'no-store'})).arrayBuffer())));
+        const k = await crypto.subtle.importKey('raw', r.v.raw, {name:'AES-CBC'}, false, ['decrypt']);
+        const t = JSON.parse(new TextDecoder().decode(await dec(k, await (await fetch(BASE + '/m/' + r.id + '.bin', {cache:'no-store'})).arrayBuffer())));
         const reg = await navigator.serviceWorker.getRegistration(BASE + '/app/');
         if (!reg) await navigator.serviceWorker.register(BASE + '/sw.js', {scope: BASE + '/app/'});
         const a = document.createElement('a');
         a.href = BASE + '/app' + t.__home__;
-        a.textContent = t.__home__.split('/').pop() + '（还剩 ' + Math.ceil((r.v.exp - now) / 864e5) + ' 天）';
-        a.style.cssText = 'display:inline-block;margin:.6rem .4rem 0;color:#14635f';
-        box.appendChild(a);
+        a.textContent = t.__title__ || t.__home__.split('/').pop();
+        a.style.cssText = 'display:inline-block;margin:.6rem .5rem 0;color:#14635f';
+        box.appendChild(a); live++;
       } catch (_) {}
+    }
+    if (cfg.g && live && live === cfg.entries.length) {      // every project open here: offer the station-wide pages
+      const a = document.createElement('a');
+      a.href = BASE + '/app/'; a.textContent = '全部页面';
+      a.style.cssText = 'display:inline-block;margin:.6rem .5rem 0;color:#14635f;font-weight:650';
+      box.prepend(a);
     }
   } catch (_) {}
 })();
@@ -56,14 +65,15 @@ document.getElementById('f').addEventListener('submit', async ev => {
   msg.textContent = ''; go.disabled = true;
   try {
     const cfg = await (await fetch(BASE + '/config.json', {cache:'no-store'})).json();
-    const raw = await crypto.subtle.importKey('raw', new TextEncoder().encode(document.getElementById('pw').value), 'PBKDF2', false, ['deriveKey']);
+    const raw = await crypto.subtle.importKey('raw', new TextEncoder().encode(document.getElementById('pw').value), 'PBKDF2', false, ['deriveBits']);
     let hit = null;
     for (const e of cfg.entries) {
-      const key = await crypto.subtle.deriveKey({name:'PBKDF2', salt:b64(e.salt), iterations:cfg.iter, hash:'SHA-256'}, raw, {name:'AES-CBC', length:256}, false, ['decrypt']);
-      try { if (new TextDecoder().decode(await dec(key, b64(e.check).buffer)) === 'ok:' + e.id) { hit = {id:e.id, key}; break; } } catch (_) {}
+      const bits = await crypto.subtle.deriveBits({name:'PBKDF2', salt:b64(e.salt), iterations:cfg.iter, hash:'SHA-256'}, raw, 256);
+      const key = await crypto.subtle.importKey('raw', bits, {name:'AES-CBC'}, false, ['decrypt']);
+      try { if (new TextDecoder().decode(await dec(key, b64(e.check).buffer)) === 'ok:' + e.id) { hit = {id:e.id, key, bits}; break; } } catch (_) {}
     }
     if (!hit) { msg.textContent = '密码不对'; go.disabled = false; return; }
-    await put(hit.id, hit.key);
+    await put(hit.id, hit.bits);
     const table = JSON.parse(new TextDecoder().decode(await dec(hit.key, await (await fetch(BASE + '/m/' + hit.id + '.bin', {cache:'no-store'})).arrayBuffer())));
     const reg = await navigator.serviceWorker.register(BASE + '/sw.js', {scope: BASE + '/app/'});
     // ready only resolves for pages inside the worker's scope, so wait on the registration itself.
