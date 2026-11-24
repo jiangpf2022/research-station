@@ -14,6 +14,7 @@ button:disabled{opacity:.6;cursor:default}
 <input id="pw" type="password" aria-label="密码" autofocus>
 <button id="go" type="submit">→</button>
 <div id="msg" role="status"></div>
+<div id="open" style="width:100%;text-align:center"></div>
 </form></main>
 <script>
 // Per-project unlock: try the password against every entry's check value; a match stores that entry's
@@ -21,11 +22,34 @@ button:disabled{opacity:.6;cursor:default}
 const BASE = location.pathname.replace(/\/(index\.html)?$/, '');
 const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 function idb(){return new Promise((ok,no)=>{const r=indexedDB.open('ps-vault-v2',1);r.onupgradeneeded=()=>r.result.createObjectStore('k');r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)})}
-async function put(id,key){const db=await idb();await new Promise((ok,no)=>{const t=db.transaction('k','readwrite');t.objectStore('k').put(key,id);t.oncomplete=ok;t.onerror=()=>no(t.error)})}
+const KEEP_MS = 3 * 24 * 3600 * 1000;   // an unlocked project stays open in this browser for 3 days
+async function put(id,key){const db=await idb();await new Promise((ok,no)=>{const t=db.transaction('k','readwrite');t.objectStore('k').put({key, exp: Date.now() + KEEP_MS},id);t.oncomplete=ok;t.onerror=()=>no(t.error)})}
 async function clearAll(){const db=await idb();await new Promise(ok=>{const t=db.transaction('k','readwrite');t.objectStore('k').clear();t.oncomplete=ok})}
 async function dec(key,buf){return crypto.subtle.decrypt({name:'AES-CBC',iv:buf.slice(0,16)},key,buf.slice(16))}
 const params = new URLSearchParams(location.search);
 if (params.has('logout')) { clearAll().then(()=>{ history.replaceState(null,'',BASE+'/'); }); }
+// Projects already unlocked in THIS browser (and not yet expired) get a direct link under the box.
+(async () => {
+  if (params.has('logout')) return;
+  try {
+    const db = await idb();
+    const rows = await new Promise(ok=>{const out=[];const c=db.transaction('k').objectStore('k').openCursor();c.onsuccess=()=>{const r=c.result;if(r){out.push({id:r.key,v:r.value});r.continue()}else ok(out)};c.onerror=()=>ok(out)});
+    const box = document.getElementById('open'), now = Date.now();
+    for (const r of rows) {
+      if (!r.v || !r.v.key || !(r.v.exp > now)) continue;
+      try {
+        const t = JSON.parse(new TextDecoder().decode(await dec(r.v.key, await (await fetch(BASE + '/m/' + r.id + '.bin', {cache:'no-store'})).arrayBuffer())));
+        const reg = await navigator.serviceWorker.getRegistration(BASE + '/app/');
+        if (!reg) await navigator.serviceWorker.register(BASE + '/sw.js', {scope: BASE + '/app/'});
+        const a = document.createElement('a');
+        a.href = BASE + '/app' + t.__home__;
+        a.textContent = t.__home__.split('/').pop() + '（还剩 ' + Math.ceil((r.v.exp - now) / 864e5) + ' 天）';
+        a.style.cssText = 'display:inline-block;margin:.6rem .4rem 0;color:#14635f';
+        box.appendChild(a);
+      } catch (_) {}
+    }
+  } catch (_) {}
+})();
 document.getElementById('f').addEventListener('submit', async ev => {
   ev.preventDefault();
   const msg = document.getElementById('msg'), go = document.getElementById('go');
