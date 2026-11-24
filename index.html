@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow"><title>&#8203;</title>
+<style>
+html,body{height:100%;margin:0;background:#f0f4f5;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",system-ui,sans-serif;color:#152934}
+main{min-height:100%;display:flex;align-items:center;justify-content:center}
+form{display:flex;gap:.5rem;flex-wrap:wrap;justify-content:center}
+input{font:inherit;padding:.6rem .8rem;border:1px solid #c5d5da;border-radius:.6rem;min-width:16rem;background:#fff}
+button{font:inherit;padding:.6rem 1rem;border:0;border-radius:.6rem;background:#14635f;color:#fff;cursor:pointer}
+button:disabled{opacity:.6;cursor:default}
+#msg{width:100%;text-align:center;min-height:1.4rem;color:#8a3b3b;font-size:.9rem}
+</style></head>
+<body><main><form id="f" autocomplete="off">
+<input id="pw" type="password" aria-label="密码" autofocus>
+<button id="go" type="submit">→</button>
+<div id="msg" role="status"></div>
+</form></main>
+<script>
+// Per-project unlock: try the password against every entry's check value; a match stores that entry's
+// non-extractable AES key in IndexedDB (read by sw.js) and opens the project's home page.
+const BASE = location.pathname.replace(/\/(index\.html)?$/, '');
+const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+function idb(){return new Promise((ok,no)=>{const r=indexedDB.open('ps-vault-v2',1);r.onupgradeneeded=()=>r.result.createObjectStore('k');r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)})}
+async function put(id,key){const db=await idb();await new Promise((ok,no)=>{const t=db.transaction('k','readwrite');t.objectStore('k').put(key,id);t.oncomplete=ok;t.onerror=()=>no(t.error)})}
+async function clearAll(){const db=await idb();await new Promise(ok=>{const t=db.transaction('k','readwrite');t.objectStore('k').clear();t.oncomplete=ok})}
+async function dec(key,buf){return crypto.subtle.decrypt({name:'AES-CBC',iv:buf.slice(0,16)},key,buf.slice(16))}
+const params = new URLSearchParams(location.search);
+if (params.has('logout')) { clearAll().then(()=>{ history.replaceState(null,'',BASE+'/'); }); }
+document.getElementById('f').addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const msg = document.getElementById('msg'), go = document.getElementById('go');
+  msg.textContent = ''; go.disabled = true;
+  try {
+    const cfg = await (await fetch(BASE + '/config.json', {cache:'no-store'})).json();
+    const raw = await crypto.subtle.importKey('raw', new TextEncoder().encode(document.getElementById('pw').value), 'PBKDF2', false, ['deriveKey']);
+    let hit = null;
+    for (const e of cfg.entries) {
+      const key = await crypto.subtle.deriveKey({name:'PBKDF2', salt:b64(e.salt), iterations:cfg.iter, hash:'SHA-256'}, raw, {name:'AES-CBC', length:256}, false, ['decrypt']);
+      try { if (new TextDecoder().decode(await dec(key, b64(e.check).buffer)) === 'ok:' + e.id) { hit = {id:e.id, key}; break; } } catch (_) {}
+    }
+    if (!hit) { msg.textContent = '密码不对'; go.disabled = false; return; }
+    await put(hit.id, hit.key);
+    const table = JSON.parse(new TextDecoder().decode(await dec(hit.key, await (await fetch(BASE + '/m/' + hit.id + '.bin', {cache:'no-store'})).arrayBuffer())));
+    const reg = await navigator.serviceWorker.register(BASE + '/sw.js', {scope: BASE + '/app/'});
+    // ready only resolves for pages inside the worker's scope, so wait on the registration itself.
+    const sw = reg.installing || reg.waiting || reg.active;
+    if (sw && sw.state !== 'activated') await new Promise(ok => sw.addEventListener('statechange', () => { if (sw.state === 'activated') ok(); }));
+    (reg.active || sw).postMessage('reload-keys');
+    const next = params.get('next');
+    location.href = BASE + '/app' + (next && table[next] ? next : table.__home__);
+  } catch (err) { msg.textContent = '无法打开：' + err.message; go.disabled = false; }
+});
+</script></body></html>
